@@ -23,99 +23,79 @@ jobs:
       - name: Setup environment
         run: |
           python3 --version
-          pip3 install meson ninja
-          brew install vala
           pip3 install lief
+          brew install vala
           xcode-select -p
           xcrun --sdk iphoneos --show-sdk-path
           xcodebuild -version
 
-      - name: Clone Frida source
+      - name: Clone Frida and Florida patches
         run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
           FRIDA_VERSION=${{ github.event.inputs.frida_version }}
           echo "Building Frida $FRIDA_VERSION for iOS arm64"
-          git clone --recurse-submodules -b $FRIDA_VERSION https://github.com/frida/frida.git
-          cd frida
-          echo "Frida source cloned at $(git describe --tags)"
+          
+          git clone --recurse-submodules https://github.com/frida/frida.git
+          git clone https://github.com/Ylarod/Florida.git
+          
+          echo "Frida cloned, applying Florida patches..."
 
-      - name: Download and apply Patchs
+      - name: Apply Florida patches
         run: |
-          git clone https://github.com/hluwa/Patchs.git
-          cd frida/subprojects/frida-core
-          echo "Applying strongR-frida patches..."
-          for patch in ../../../Patchs/strongR-frida/frida-core/*.patch; do
-            echo "Applying: $(basename $patch)"
-            git apply "$patch" || {
-              echo "Warning: git apply failed, trying patch -p1..."
-              patch -p1 < "$patch" || echo "Patch $(basename $patch) failed, skipping"
-            }
+          cd frida
+          for path in ../Florida/patches/*; do
+            name=$(basename $path)
+            if [ -d "subprojects/$name" ]; then
+              echo "Applying patches to frida/subprojects/$name"
+              cd subprojects/$name
+              git am ../../../Florida/patches/$name/*.patch || {
+                echo "git am failed for $name, trying git apply..."
+                for p in ../../../Florida/patches/$name/*.patch; do
+                  git apply "$p" || echo "Warning: $(basename $p) failed"
+                done
+              }
+              cd ../..
+            else
+              echo "Skipping $name - subproject not found"
+            fi
           done
           echo "All patches applied."
-          git diff --stat
 
-      - name: Remove unnecessary subprojects
+      - name: Build frida for iOS arm64
         run: |
-          cd frida
-          # Remove Python-dependent subprojects that we don't need
-          rm -rf subprojects/frida-python
-          rm -rf subprojects/frida-tools
-          rm -rf subprojects/frida-node
-          rm -rf subprojects/frida-qml
-          rm -rf subprojects/frida-clr
-          rm -rf subprojects/frida-swift
-          # Remove references from meson.build
-          sed -i '' "/frida-python/d" meson.build
-          sed -i '' "/frida-tools/d" meson.build
-          sed -i '' "/frida-node/d" meson.build
-          sed -i '' "/frida-qml/d" meson.build
-          sed -i '' "/frida-clr/d" meson.build
-          sed -i '' "/frida-swift/d" meson.build
-          echo "Cleaned up subprojects"
-          cat meson.build
+          mkdir build-ios-arm64
+          cd build-ios-arm64
+          ../frida/configure --host=ios-arm64
+          make
+          echo "=== Build completed ==="
 
-      - name: Build frida-server for iOS arm64
-        run: |
-          cd frida
-          make core-ios-arm64
-          echo "=== Build completed! ==="
-          echo "Searching for built files..."
-          find build -name 'frida-server' -type f 2>/dev/null
-          find build -name 'frida-agent*' -type f 2>/dev/null
-          find build -type f \( -name 'frida-server' -o -name 'frida-agent*' \) 2>/dev/null
-
-      - name: Collect build artifacts
+      - name: Collect and upload artifacts
         run: |
           mkdir -p output
           FRIDA_VERSION=${{ github.event.inputs.frida_version }}
           
-          # Search broadly for built binaries
-          echo "=== All frida binaries found ==="
-          find frida/build -type f -name 'frida*' 2>/dev/null | head -50
+          SERVER="build-ios-arm64/subprojects/frida-core/server/frida-server"
+          INJECT="build-ios-arm64/subprojects/frida-core/inject/frida-inject"
+          GADGET="build-ios-arm64/subprojects/frida-core/lib/gadget/frida-gadget.dylib"
           
-          # Copy server
-          find frida/build -name 'frida-server' -type f 2>/dev/null | head -1 | while read f; do
-            echo "Found server: $f"
-            cp "$f" "output/frida-server-strongR-${FRIDA_VERSION}-ios-arm64"
-          done
-          
-          # Copy agent
-          find frida/build -name 'frida-agent.dylib' -type f 2>/dev/null | head -1 | while read f; do
-            echo "Found agent: $f"
-            cp "$f" "output/frida-agent-strongR-${FRIDA_VERSION}-ios-arm64.dylib"
-          done
-          
-          # Also try .a static libraries
-          find frida/build -name 'frida-core*' -type f 2>/dev/null | head -5 | while read f; do
-            echo "Found core lib: $f"
-          done
-          
-          echo "=== Output directory ==="
-          ls -la output/ 2>/dev/null || echo "output is empty"
+          [ -f "$SERVER" ] && cp "$SERVER" "output/frida-server-${FRIDA_VERSION}-ios-arm64" && echo "Found server"
+          [ -f "$INJECT" ] && cp "$INJECT" "output/frida-inject-${FRIDA_VERSION}-ios-arm64" && echo "Found inject"
+          [ -f "$GADGET" ] && cp "$GADGET" "output/frida-gadget-${FRIDA_VERSION}-ios-arm64.dylib" && echo "Found gadget"
           
           if [ -z "$(ls -A output 2>/dev/null)" ]; then
-            echo "WARNING: No server/agent binaries found in standard paths"
-            echo "=== Full build directory listing ==="
-            find frida/build -type f 2>/dev/null | grep -v '__pycache__' | head -100
+            echo "Standard paths empty, searching..."
+            find build-ios-arm64 -type f \( -name 'frida-server' -o -name 'frida-inject' -o -name 'frida-gadget*' \) 2>/dev/null | while read f; do
+              echo "Found: $f"
+              cp "$f" output/
+            done
+          fi
+          
+          ls -la output/
+          if [ -z "$(ls -A output 2>/dev/null)" ]; then
+            echo "ERROR: No artifacts!"
+            find build-ios-arm64 -type f 2>/dev/null | grep -v __pycache__ | head -50
             exit 1
           fi
 
