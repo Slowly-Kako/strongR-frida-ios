@@ -23,7 +23,8 @@ jobs:
       - name: Setup environment
         run: |
           python3 --version
-          brew install meson ninja vala
+          pip3 install meson ninja
+          brew install vala
           pip3 install lief
           xcode-select -p
           xcrun --sdk iphoneos --show-sdk-path
@@ -52,38 +53,69 @@ jobs:
           echo "All patches applied."
           git diff --stat
 
+      - name: Remove unnecessary subprojects
+        run: |
+          cd frida
+          # Remove Python-dependent subprojects that we don't need
+          rm -rf subprojects/frida-python
+          rm -rf subprojects/frida-tools
+          rm -rf subprojects/frida-node
+          rm -rf subprojects/frida-qml
+          rm -rf subprojects/frida-clr
+          rm -rf subprojects/frida-swift
+          # Remove references from meson.build
+          sed -i '' "/frida-python/d" meson.build
+          sed -i '' "/frida-tools/d" meson.build
+          sed -i '' "/frida-node/d" meson.build
+          sed -i '' "/frida-qml/d" meson.build
+          sed -i '' "/frida-clr/d" meson.build
+          sed -i '' "/frida-swift/d" meson.build
+          echo "Cleaned up subprojects"
+          cat meson.build
+
       - name: Build frida-server for iOS arm64
         run: |
           cd frida
-          # Remove frida-python subproject to avoid Python compatibility issues
-          rm -rf subprojects/frida-python
-          sed -i '' "/frida-python/d" meson.build || true
-          # Build only core for iOS arm64
-          make core-ios-arm64 || {
-            echo "make core failed, trying direct meson build..."
-            python3 releng/meson_configure.py --prefix=/usr/local --host=ios-arm64 build/frida-ios-arm64 || true
-            ninja -C build/frida-ios-arm64/tmp-ios-arm64/frida-core || true
-          }
-          echo "Build completed!"
-          find build -name 'frida-server*' -type f 2>/dev/null
-          find build -type f -name 'frida-server' 2>/dev/null
+          make core-ios-arm64
+          echo "=== Build completed! ==="
+          echo "Searching for built files..."
+          find build -name 'frida-server' -type f 2>/dev/null
+          find build -name 'frida-agent*' -type f 2>/dev/null
+          find build -type f \( -name 'frida-server' -o -name 'frida-agent*' \) 2>/dev/null
 
       - name: Collect build artifacts
         run: |
           mkdir -p output
           FRIDA_VERSION=${{ github.event.inputs.frida_version }}
-          find frida/build -name 'frida-server' -type f 2>/dev/null | while read f; do
+          
+          # Search broadly for built binaries
+          echo "=== All frida binaries found ==="
+          find frida/build -type f -name 'frida*' 2>/dev/null | head -50
+          
+          # Copy server
+          find frida/build -name 'frida-server' -type f 2>/dev/null | head -1 | while read f; do
             echo "Found server: $f"
             cp "$f" "output/frida-server-strongR-${FRIDA_VERSION}-ios-arm64"
           done
-          find frida/build -name 'frida-agent.dylib' -type f 2>/dev/null | while read f; do
+          
+          # Copy agent
+          find frida/build -name 'frida-agent.dylib' -type f 2>/dev/null | head -1 | while read f; do
             echo "Found agent: $f"
             cp "$f" "output/frida-agent-strongR-${FRIDA_VERSION}-ios-arm64.dylib"
           done
-          ls -la output/
+          
+          # Also try .a static libraries
+          find frida/build -name 'frida-core*' -type f 2>/dev/null | head -5 | while read f; do
+            echo "Found core lib: $f"
+          done
+          
+          echo "=== Output directory ==="
+          ls -la output/ 2>/dev/null || echo "output is empty"
+          
           if [ -z "$(ls -A output 2>/dev/null)" ]; then
-            echo "ERROR: No build artifacts found!"
-            find frida/build -type f -name 'frida*' 2>/dev/null | head -30
+            echo "WARNING: No server/agent binaries found in standard paths"
+            echo "=== Full build directory listing ==="
+            find frida/build -type f 2>/dev/null | grep -v '__pycache__' | head -100
             exit 1
           fi
 
