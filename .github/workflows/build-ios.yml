@@ -1,0 +1,75 @@
+name: Build strongR-frida iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      frida_version:
+        description: 'Frida version to build (e.g. 17.7.3)'
+        required: true
+        default: '17.7.3'
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: |
+          brew install meson ninja vala
+          pip3 install lief --break-system-packages || pip3 install lief
+          xcode-select -p
+          xcrun --sdk iphoneos --show-sdk-path
+          xcodebuild -version
+
+      - name: Clone Frida source
+        run: |
+          FRIDA_VERSION=${{ github.event.inputs.frida_version }}
+          echo "Building Frida $FRIDA_VERSION for iOS arm64"
+          git clone --recurse-submodules -b $FRIDA_VERSION https://github.com/frida/frida.git
+          cd frida
+          echo "Frida source cloned at $(git describe --tags)"
+
+      - name: Download and apply Patchs
+        run: |
+          git clone https://github.com/hluwa/Patchs.git
+          cd frida/subprojects/frida-core
+          echo "Applying strongR-frida patches..."
+          for patch in ../../../Patchs/strongR-frida/frida-core/*.patch; do
+            echo "Applying: $(basename $patch)"
+            git apply "$patch" || {
+              echo "Warning: git apply failed, trying patch -p1..."
+              patch -p1 < "$patch" || echo "Patch $(basename $patch) failed, skipping"
+            }
+          done
+          echo "All patches applied."
+          git diff --stat
+
+      - name: Build frida-server for iOS arm64
+        run: |
+          cd frida
+          make core-ios-arm64
+          echo "Build completed!"
+          find build -name 'frida-server*' -type f 2>/dev/null
+
+      - name: Collect build artifacts
+        run: |
+          mkdir -p output
+          FRIDA_VERSION=${{ github.event.inputs.frida_version }}
+          find frida/build -name 'frida-server' -type f 2>/dev/null | while read f; do
+            echo "Found: $f"
+            cp "$f" "output/frida-server-strongR-${FRIDA_VERSION}-ios-arm64"
+          done
+          find frida/build -name 'frida-agent.dylib' -type f 2>/dev/null | while read f; do
+            echo "Found: $f"
+            cp "$f" "output/frida-agent-strongR-${FRIDA_VERSION}-ios-arm64.dylib"
+          done
+          ls -la output/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: strongR-frida-ios-arm64-${{ github.event.inputs.frida_version }}
+          path: output/
+          retention-days: 30
